@@ -453,6 +453,7 @@ impl TokenManager {
         let project_id = token_obj
             .get("project_id")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
         // 【新增】提取订阅等级 (subscription_tier 为 "FREE" | "PRO" | "ULTRA")
@@ -567,43 +568,45 @@ impl TokenManager {
             None => return false,
         };
 
-        // 5. 遍历受监控的模型，检查保护与恢复
-        let threshold = config.threshold_percentage as i32;
-
-        let mut changed = false;
+        // 5. [重构] 聚合判定逻辑：按 Standard ID 对账号所有型号进行分组
+        // 解决如 Pro-Low (0%) 和 Pro-High (100%) 在同一账号内导致状态冲突的问题
+        let mut group_min_percentage: HashMap<String, i32> = HashMap::new();
 
         for model in models {
             let name = model.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            // [FIX] 先归一化模型名，再检查是否在监控列表中
-            // 这样 claude-opus-4-5-thinking 会被归一化为 claude-sonnet-4-5 进行匹配
-            let standard_id = crate::proxy::common::model_mapping::normalize_to_standard_id(name)
-                .unwrap_or_else(|| name.to_string());
+            let percentage = model.get("percentage").and_then(|v| v.as_i64()).unwrap_or(100) as i32;
 
-            if !config.monitored_models.iter().any(|m| m == &standard_id) {
-                continue;
+            if let Some(std_id) = crate::proxy::common::model_mapping::normalize_to_standard_id(name) {
+                let entry = group_min_percentage.entry(std_id).or_insert(100);
+                if percentage < *entry {
+                    *entry = percentage;
+                }
             }
+        }
 
-            let percentage = model
-                .get("percentage")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
-            let account_id = account_json
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
+        // 6. 遍历受监控的 Standard ID，根据组内“最差状态”执行锁定或恢复
+        let threshold = config.threshold_percentage as i32;
+        let account_id = account_json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let mut changed = false;
 
-            if percentage <= threshold {
-                // 触发保护 (Issue #621 改为模型级)
-                // [FIX] 使用归一化后的 standard_id 而不是原始 name
+        for std_id in &config.monitored_models {
+            // 获取该组的最低百分比，如果账号没该组型号则视为 100%
+            let min_pct = group_min_percentage.get(std_id).cloned().unwrap_or(100);
+
+            if min_pct <= threshold {
+                // 只要组内有一个不行，触发全组保护
                 if self
                     .trigger_quota_protection(
                         account_json,
                         &account_id,
                         account_path,
-                        percentage,
+                        min_pct,
                         threshold,
-                        &standard_id,
+                        std_id,
                     )
                     .await
                     .unwrap_or(false)
@@ -611,23 +614,22 @@ impl TokenManager {
                     changed = true;
                 }
             } else {
-                // 尝试恢复 (如果之前受限)
+                // 只有全组都好（或者没这型号），才尝试从之前受限状态恢复
                 let protected_models = account_json
                     .get("protected_models")
                     .and_then(|v| v.as_array());
-                // [FIX] 使用归一化后的 standard_id 进行匹配
+                
                 let is_protected = protected_models.map_or(false, |arr| {
-                    arr.iter().any(|m| m.as_str() == Some(&standard_id as &str))
+                    arr.iter().any(|m| m.as_str() == Some(std_id as &str))
                 });
 
                 if is_protected {
-                    // [FIX] 使用归一化后的 standard_id
                     if self
                         .restore_quota_protection(
                             account_json,
                             &account_id,
                             account_path,
-                            &standard_id,
+                            std_id,
                         )
                         .await
                         .unwrap_or(false)
@@ -1199,9 +1201,14 @@ impl TokenManager {
                         }
                     }
 
-                    // 确保有 project_id
+                    // 确保有 project_id (filter empty strings to trigger re-fetch)
                     let project_id = if let Some(pid) = &token.project_id {
-                        pid.clone()
+                        if pid.is_empty() { None } else { Some(pid.clone()) }
+                    } else {
+                        None
+                    };
+                    let project_id = if let Some(pid) = project_id {
+                        pid
                     } else {
                         match crate::proxy::project_resolver::fetch_project_id(&token.access_token)
                             .await
@@ -1564,9 +1571,14 @@ impl TokenManager {
                 }
             }
 
-            // 4. 确保有 project_id
+            // 4. 确保有 project_id (filter empty strings to trigger re-fetch)
             let project_id = if let Some(pid) = &token.project_id {
-                pid.clone()
+                if pid.is_empty() { None } else { Some(pid.clone()) }
+            } else {
+                None
+            };
+            let project_id = if let Some(pid) = project_id {
+                pid
             } else {
                 tracing::debug!("账号 {} 缺少 project_id，尝试获取...", token.email);
                 match crate::proxy::project_resolver::fetch_project_id(&token.access_token).await {
@@ -1578,23 +1590,12 @@ impl TokenManager {
                         pid
                     }
                     Err(e) => {
-                        tracing::error!("Failed to fetch project_id for {}: {}", token.email, e);
-                        last_error = Some(format!(
-                            "Failed to fetch project_id for {}: {}",
+                        tracing::warn!(
+                            "Failed to fetch project_id for {}, using fallback: {}",
                             token.email, e
-                        ));
-                        attempted.insert(token.account_id.clone());
-
-                        // 【优化】标记需要清除锁定，避免在循环内加锁
-                        if quota_group != "image_gen" {
-                            if matches!(&last_used_account_id, Some((id, _)) if id == &token.account_id)
-                            {
-                                need_update_last_used =
-                                    Some((String::new(), std::time::Instant::now()));
-                                // 空字符串表示需要清除
-                            }
-                        }
-                        continue;
+                        );
+                        // [FIX #1794] 为 503 问题提供稳定兜底，不跳过该账号
+                        "bamboo-precept-lgxtn".to_string()
                     }
                 }
             };
@@ -1735,7 +1736,9 @@ impl TokenManager {
             None => return Err(format!("未找到账号: {}", email)),
         };
 
-        let project_id = project_id_opt.unwrap_or_else(|| "bamboo-precept-lgxtn".to_string());
+        let project_id = project_id_opt
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "bamboo-precept-lgxtn".to_string());
 
         // 检查是否过期 (提前5分钟)
         if now < timestamp + expires_in - 300 {

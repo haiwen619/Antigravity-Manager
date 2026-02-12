@@ -35,7 +35,7 @@ export const MODEL_CONFIG: Record<string, ModelConfig> = {
     'gemini-3-pro-image': {
         label: 'Gemini 3 Image',
         shortLabel: 'G3 Image',
-        protectedKey: 'gemini-pro-image',
+        protectedKey: 'gemini-3-pro-image',
         Icon: Gemini.Color,
     },
     'gemini-3-pro-low': {
@@ -64,36 +64,24 @@ export const MODEL_CONFIG: Record<string, ModelConfig> = {
         protectedKey: 'gemini-flash',
         Icon: Gemini.Color,
     },
-    'gemini-2.5-pro': {
-        label: 'Gemini 2.5 Pro',
-        shortLabel: 'G2.5 Pro',
-        protectedKey: 'gemini-pro',
-        Icon: Gemini.Color,
-    },
 
     // Claude 系列
     'claude-sonnet-4-5': {
-        label: 'Claude 4.5 Sonnet',
+        label: 'Claude 4.5',
         shortLabel: 'Claude 4.5',
-        protectedKey: 'claude-sonnet',
+        protectedKey: 'claude',
         Icon: Claude.Color,
     },
     'claude-sonnet-4-5-thinking': {
-        label: 'Claude 4.5 Sonnet Think',
-        shortLabel: 'Claude 4.5 Tk',
-        protectedKey: 'claude-sonnet',
-        Icon: Claude.Color,
-    },
-    'claude-opus-4-5-thinking': {
-        label: 'Claude 4.5 Opus Think',
-        shortLabel: 'Claude 4.5 Op',
-        protectedKey: 'claude-opus',
+        label: 'Claude 4.5 TK',
+        shortLabel: 'Claude 4.5 TK',
+        protectedKey: 'claude',
         Icon: Claude.Color,
     },
     'claude-opus-4-6-thinking': {
-        label: 'Claude 4.6 Opus Think',
-        shortLabel: 'Claude 4.6 Op',
-        protectedKey: 'claude-opus',
+        label: 'Claude 4.6 TK',
+        shortLabel: 'Claude 4.6 TK',
+        protectedKey: 'claude',
         Icon: Claude.Color,
     },
 };

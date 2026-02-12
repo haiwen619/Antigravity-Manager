@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::proxy::ProxyConfig;
+use crate::modules::cloudflared::CloudflaredConfig;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub struct AppConfig {
     pub circuit_breaker: CircuitBreakerConfig, // [NEW] Circuit breaker configuration
     #[serde(default)]
     pub hidden_menu_items: Vec<String>, // Hidden menu item path list
+    #[serde(default)]
+    pub cloudflared: CloudflaredConfig, // [NEW] Cloudflared configuration
 }
 
 /// Scheduled warmup configuration
@@ -43,7 +46,7 @@ pub struct ScheduledWarmupConfig {
 fn default_warmup_models() -> Vec<String> {
     vec![
         "gemini-3-flash".to_string(),
-        "claude-sonnet-4-5".to_string(),
+        "claude".to_string(),
         "gemini-3-pro-high".to_string(),
         "gemini-3-pro-image".to_string(),
     ]
@@ -80,7 +83,7 @@ pub struct QuotaProtectionConfig {
 
 fn default_monitored_models() -> Vec<String> {
     vec![
-        "claude-sonnet-4-5".to_string(),
+        "claude".to_string(),
         "gemini-3-pro-high".to_string(),
         "gemini-3-flash".to_string(),
         "gemini-3-pro-image".to_string(),
@@ -184,6 +187,7 @@ impl AppConfig {
             pinned_quota_models: PinnedQuotaModelsConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             hidden_menu_items: Vec::new(),
+            cloudflared: CloudflaredConfig::default(),
         }
     }
 }

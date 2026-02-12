@@ -166,7 +166,8 @@ pub async fn handle_chat_completions(
             &tools_val,
             None, // size (not used in handler, transform_openai_request handles it)
             None, // quality
-            None, // OpenAI handler uses transform_openai_request for image gen
+            None, // image_size
+            None, // body
         );
 
         // 3. 提取 SessionId (粘性指纹)
@@ -1144,7 +1145,8 @@ pub async fn handle_completions(
             &tools_val,
             None, // size
             None, // quality
-            None, // OpenAI handler uses transform_openai_request for image gen
+            None, // image_size
+            None, // body
         );
 
         // 3. 提取 SessionId (复用)
@@ -1615,6 +1617,12 @@ pub async fn handle_images_generations(
         .get("quality")
         .and_then(|v| v.as_str())
         .unwrap_or("standard");
+
+    let image_size = body
+        .get("image_size")
+        .or(body.get("imageSize"))
+        .and_then(|v| v.as_str());
+
     let style = body
         .get("style")
         .and_then(|v| v.as_str())
@@ -1635,6 +1643,7 @@ pub async fn handle_images_generations(
         model,
         Some(size),
         Some(quality),
+        image_size,
     );
 
     // 3. Prompt Enhancement（保留原有逻辑）
@@ -1674,7 +1683,7 @@ pub async fn handle_images_generations(
             for attempt in 0..max_attempts {
                 // 4.1 获取 Token
                 let (access_token, project_id, email, account_id, _wait_ms) = match token_manager
-                    .get_token("image_gen", attempt > 0, None, "dall-e-3")
+                    .get_token("image_gen", attempt > 0, None, "gemini-3-pro-image")
                     .await
                 {
                     Ok(t) => t,
@@ -2003,6 +2012,7 @@ pub async fn handle_images_edits(
         &model,
         size_input,
         quality_input,
+        image_size_param.as_deref(), // [NEW] Pass direct image_size param
     );
 
     // 3. Construct Contents
@@ -2071,7 +2081,7 @@ pub async fn handle_images_edits(
             for attempt in 0..max_attempts {
                 // 4.1 获取 Token
                 let (access_token, project_id, email, account_id, _wait_ms) = match token_manager
-                    .get_token("image_gen", attempt > 0, None, "dall-e-3")
+                    .get_token("image_gen", attempt > 0, None, "gemini-3-pro-image")
                     .await
                 {
                     Ok(t) => t,

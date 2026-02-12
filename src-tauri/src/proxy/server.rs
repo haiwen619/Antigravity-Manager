@@ -509,6 +509,7 @@ impl AxumServer {
             .route("/proxy/opencode/status", post(admin_get_opencode_sync_status))
             .route("/proxy/opencode/sync", post(admin_execute_opencode_sync))
             .route("/proxy/opencode/restore", post(admin_execute_opencode_restore))
+            .route("/proxy/opencode/clear", post(admin_execute_opencode_clear))
             .route("/proxy/opencode/config", post(admin_get_opencode_config_content))
             .route("/proxy/droid/status", post(admin_get_droid_sync_status))
             .route("/proxy/droid/sync", post(admin_execute_droid_sync))
@@ -3145,6 +3146,7 @@ async fn admin_get_ip_blacklist() -> Result<impl IntoResponse, (StatusCode, Json
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AddBlacklistRequest {
     ip_pattern: String,
     reason: Option<String>,
@@ -3190,7 +3192,7 @@ async fn admin_clear_ip_blacklist() -> Result<impl IntoResponse, (StatusCode, Js
     let entries = security_db::get_blacklist()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
     for entry in entries {
-        security_db::remove_from_blacklist(&entry.ip_pattern)
+        security_db::remove_from_blacklist(&entry.id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
     }
     Ok(StatusCode::OK)
@@ -3217,6 +3219,7 @@ async fn admin_get_ip_whitelist() -> Result<impl IntoResponse, (StatusCode, Json
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AddWhitelistRequest {
     ip_pattern: String,
     description: Option<String>,
@@ -3406,6 +3409,25 @@ async fn admin_get_opencode_config_content(
             Json(ErrorResponse { error: e.to_string() }),
         ))?
         .map(Json)
+        .map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpencodeClearRequest {
+    proxy_url: Option<String>,
+    clear_legacy: Option<bool>,
+}
+
+async fn admin_execute_opencode_clear(
+    Json(payload): Json<OpencodeClearRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::proxy::opencode_sync::execute_opencode_clear(payload.proxy_url, payload.clear_legacy)
+        .await
+        .map(|_| StatusCode::OK)
         .map_err(|e| (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: e }),

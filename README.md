@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-> 专业的 AI 账号管理与协议反代系统 (v4.1.11)
+> 专业级 AI 账号管理与协议代理系统 (v4.1.15)
 <div align="center">
   <img src="public/icon.png" alt="Antigravity Logo" width="120" height="120" style="border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15);">
 
@@ -8,7 +8,7 @@
   
   <p>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.1.11-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-4.1.15-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -242,10 +242,20 @@ claude
 
 ### 如何接入 OpenCode?
 1.  进入 **API 反代**页面 → **外部 Providers** → 点击 **OpenCode Sync** 卡片。
-2.  点击 **Sync** 按钮，将自动生成 `~/.config/opencode/opencode.json` 配置文件（包含代理 baseURL 与 apiKey，支持 Anthropic/Google 双 Provider）。
-3.  可选：勾选 **Sync accounts** 可同时导出 `antigravity-accounts.json` 账号列表，供 OpenCode 插件直接导入使用。
+2.  点击 **Sync** 按钮，将自动生成 `~/.config/opencode/opencode.json` 配置文件：
+    - 创建独立 provider `antigravity-manager`（不覆盖 google/anthropic 原生配置）
+    - 可选：勾选 **Sync accounts** 导出 `antigravity-accounts.json`（plugin-compatible v3 格式），供 OpenCode 插件直接导入
+3.  点击 **Clear Config** 可一键清除 Manager 配置并清理 legacy 残留；点击 **Restore** 可从备份恢复。
 4.  Windows 用户路径为 `C:\Users\<用户名>\.config\opencode\`（与 `~/.config/opencode` 规则一致）。
-5.  如需回滚，可点击 **Restore** 按钮从备份恢复之前的配置。
+
+**快速验证命令：**
+```bash
+# 测试 antigravity-manager provider（支持 --variant）
+opencode run "test" --model antigravity-manager/claude-sonnet-4-5-thinking --variant high
+
+# 若已安装 opencode-antigravity-auth 插件，验证 google provider 仍可独立工作
+opencode run "test" --model google/antigravity-claude-sonnet-4-5-thinking --variant max
+```
 
 ### 如何接入 Kilo Code?
 1.  **协议选择**: 建议优先使用 **Gemini 协议**。
@@ -334,7 +344,42 @@ curl -X POST http://127.0.0.1:8045/v1/messages \
   }'
 ```
 
-**参数优先级**: 请求体参数 > 模型后缀
+```
+
+**参数优先级**: `imageSize` 参数 > `quality` 参数 > 模型后缀
+
+**✨ 新增 `imageSize` 参数支持**:
+
+除了 `quality` 参数外,现在还支持直接使用 Gemini 原生的 `imageSize` 参数:
+
+```python
+# 使用 imageSize 参数(最高优先级)
+response = client.chat.completions.create(
+    model="gemini-3-pro-image",
+    size="16:9",           # 宽高比
+    imageSize="4K",        # ✨ 直接指定分辨率: "1K" | "2K" | "4K"
+    messages=[{"role": "user", "content": "一座未来主义风格的城市"}]
+)
+```
+
+```bash
+# Claude Messages API 也支持 imageSize
+curl -X POST http://127.0.0.1:8045/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-antigravity" \
+  -d '{
+    "model": "gemini-3-pro-image",
+    "size": "1280x720",
+    "imageSize": "4K",
+    "messages": [{"role": "user", "content": "一只可爱的猫咪"}]
+  }'
+```
+
+**参数说明**:
+- **`imageSize`**: 直接指定分辨率 (`"1K"` / `"2K"` / `"4K"`)
+- **`quality`**: 通过质量等级推断分辨率 (`"standard"` → 1K, `"medium"` → 2K, `"hd"` → 4K)
+- **优先级**: 如果同时指定 `imageSize` 和 `quality`,系统会优先使用 `imageSize`
+
 
 #### 方式三：Chat 接口 + 模型后缀
 ```python
@@ -368,6 +413,98 @@ response = client.chat.completions.create(
 ## 📝 开发者与社区
 
 *   **版本演进 (Changelog)**:
+    *   **v4.1.15 (2026-02-11)**:
+        -   **[核心功能] 开启 macOS 与 Windows 原生自动更新支持 (PR #1850)**:
+            -   **端到端自动更新**: 启用了 Tauri 的原生更新插件，支持在应用内直接检测、下载并安装更新。
+            -   **发布工作流修复**: 彻底修复了 Release 工作流中生成更新元数据 (`updater.json`) 的逻辑。现在系统会自动根据 `.sig` 签名文件构建完整的更新索引，支持 darwin-aarch64, darwin-x86_64 以及 windows-x86_64 架构。
+            -   **体验打通**: 配合前端已有的更新提醒组件，实现了从发布到安装的全自动化闭环。
+        -   **[核心修复] 解决切换账号时由于空 Project ID 导致的 400 错误 (PR #1852)**:
+            -   **空值过滤**: 在 Proxy 层增加了对 `project_id` 的空字符串过滤逻辑。
+            -   **自动纠错**: 当检测到账号数据中的 `project_id` 为空时，现在会触发自动重新获取流程，有效解决了 Issue #1846 和 #1851 中提到的 "Invalid project resource name projects/" 错误。
+        -   **[故障排查] 针对 HTTP 404 "Resource projects/... not found" 的解决建议 (Issue #1858)**:
+            -   **验证项目 ID**: 登录 [Google Cloud Console](https://console.cloud.google.com/)，在项目选择器中搜索报错提到的 ID（如 `bold-spark-xxx`）。若项目不存在，请创建新项目并启用所需的 Vertex AI API。
+            -   **重置账户会话**: 尝试在 Antigravity 应用中“删除账户”并“重新添加”，以清除旧的会话残留。
+            -   **CLI 辅助验证**: 建议使用 Gemini CLI (`gcloud auth login`) 重新进行身份验证，并确保 `gcloud config set project` 指向了正确的有效项目。
+        -   **[故障排查] 针对 HTTP 403 "Forbidden" 错误的解决建议 (Issue #1834)**:
+            -   **检查验证链接**: 请检查 API 响应中是否包含提示 "To continue, verify your account at..." 的链接。若有，请点击该链接并按照 Google 提示完成验证。
+            -   **确认计划资格**: 访问 [FAQ 页面](https://antigravity.google/docs/faq#why-am-i-ineligible-for-a-google-one-ai-plan) 确认您的账号是否符合 Google One AI 计划或 Gemini Code Assist 的使用要求。
+            -   **自动恢复**: 部分 403 错误（如触发风险控制或配额调整）可能会在等待一段时间后自动恢复正常。
+    *   **v4.1.15 (2026-02-11)**:
+        -   **[核心修复] Cloudflared 公网访问设置持久化 (Issue #1805)**:
+            -   **设置记忆**: 修复了 Cloudflared (CF Tunnel) 的 Token、隧道模式及 HTTP/2 设置在应用重启后丢失的问题。
+            -   **热更新同步**: 实现了设置的实时持久化。现在切换隧道模式、修改 Token (失焦同步) 或切换 HTTP/2 选项时，配置都会立即保存，确保重启后恢复如初。
+        -   **[核心修复] 修复 Warmup 过程中的 403 禁用标记 (PR #1803)**:
+            -   **禁用识别**: 修复了账号在 Warmup (预热) 过程中返回 403 错误时未被标记为 `is_forbidden` 的问题。
+            -   **自动跳过**: 现在 Warmup 过程中检测到 403 将立即标记并持久化账号禁用状态，并在后续的调度、预热和配额检查中自动跳过该账号，避免无效请求。
+        -   **[UI 优化] 迷你视图 (Mini View) 状态显示与交互增强 (PR #1816)**:
+            -   **状态指示点**: 在迷你视图底部新增了请求状态圆点。成功 (200-399) 显示为绿色，失败显示为红色，直观反馈最近一次请求结果。
+            -   **模型名称回退**: 优化了模型名称显示逻辑。当 `mapped_model` 为空时，自动回退显示原始模型 ID 而非 "Unknown"，提升信息透明度。
+            -   **刷新动画优化**: 改进了刷新按钮的动画效果，使旋转动画仅作用于 `RefreshCw` 图标本身，交互更加细腻。
+        -   **[核心功能] Claude 4.6 Adaptive Thinking 模式支持**:
+            -   **Dynamic Effort**: 全面支持 `effort` 参数 (low/medium/high)，允许用户动态调整模型的思考深度与预算。
+            -   **Token 限制自适应**: 修复了 Adaptive 模式下 `maxOutputTokens` 未能正确感知 Budget 导致被截断的问题，确保长思维链不被腰斩。
+        -   **[文档更新] 新增 Adaptive 模式测试用例**:
+            -   提供了 `docs/adaptive_mode_test_examples.md`，涵盖多轮对话、复杂任务场景及 Budget 模式切换的完整验证指南。
+        -   **[核心功能] 图片生成 imageSize 参数支持**:
+            -   **直接参数支持**: 新增对 Gemini 原生 `imageSize` 参数的直接支持,可在所有协议(OpenAI/Claude/Gemini)中使用。
+            -   **参数优先级**: 实现了清晰的参数优先级逻辑:`imageSize` 参数 > `quality` 参数推断 > 模型后缀推断。
+            -   **全协议兼容**: OpenAI Chat API、Claude Messages API 和 Gemini 原生协议均支持通过 `imageSize` 字段直接指定分辨率("1K"/"2K"/"4K")。
+            -   **向后兼容**: 完全兼容现有的 `quality` 参数和模型后缀方式,不影响现有代码。
+        -   **[核心功能] Opencode 提供商隔离与清理工作流 (PR #1820)**:
+            -   **隔离同步逻辑**: 实现 Opencode 提供商的独立同步机制,防止状态污染,确保数据纯净。
+            -   **清理工作流**: 新增资源清理工作流,优化资源管理,提升系统运行效率。
+            -   **稳定性增强**: 增强了同步过程的稳定性和可靠性。
+    *   **v4.1.15 (2026-02-11)**:
+        -   **[核心功能] Homebrew Cask 安装检测与支持 (PR #1673)**:
+            -   **应用升级**: 新增了对 Homebrew Cask 安装的检测逻辑。如果应用是通过 Cask 安装的，现在可以直接在应用内触发 `brew upgrade --cask` 流程，实现无缝升级体验。
+        -   **[核心修复] Gemini 图像生成配额保护 (PR #1764)**:
+            -   **保护生效**: 修复了配额保护机制可能会错误统计文本请求的问题，并确保在绘图配额耗尽时能正确拦截 `gemini-3-pro-image` 的请求。
+        -   **[UI 优化] 修复导航栏边界与显示问题 (PR #1636)**:
+            -   **边界修复**: 修复了导航栏右侧菜单在特定窗口宽度下可能超出边界或显示不全的问题。
+            -   **兼容性**: 此次合并保留了主分支上的 Mini View 等新特性，只应用了必要的样式修正。
+        -   **[UI 优化] 修复英文模式下的布局溢出与水平滚动 (Issue #1783)**:
+            -   **全局限制**: 在全局样式中封锁了水平轴溢出，杜绝了因文字过长导致的页面横向抖动。
+            -   **响应式增强**: 优化了导航栏断点，将文字胶囊的显示阈值提高至 1120px，确保长英文标签在窄窗口下自动切换为图标模式，保持布局整洁。
+        -   **[核心修复] 修复处理复杂 JSON Schema 时可能发生的栈溢出问题 (Issue #1781)**:
+            -   **安全加固**: 为 `flatten_refs` 等深度递归逻辑引入了 `MAX_RECURSION_DEPTH` (10) 限制，有效防止了由循环引用或过深嵌套导致的程序崩溃。
+        -   **[核心修复] 修复流式输出下多个工具调用被错误拼接的问题 (Issue #1786)**:
+            -   **索引校正**: 修正了 `create_openai_sse_stream` 中 `tool_calls` 的索引分配逻辑，确保同一个 chunk 中的多个工具调用拥有独立且连续的 `index`，避免了参数被错误拼接导致解析失败的现象。
+        -   **[核心修复] 修复 Claude Thinking 模型多轮对话时的签名错误 (Issue #1790)**:
+            -   **签名注入与降级**: 在 OpenAI 协议转换层中增加了对历史消息思考块签名的自动注入逻辑。当无法获取有效签名时，自动将其降级为普通文本块，从而解决了 Claude-opus-thinking 等模型在多轮对话中因签名缺失导致的 HTTP 400 错误。
+        -   **[核心修复] 修复 Google Cloud 项目 ID 获取失败导致的 503 错误 (Issue #1794)**:
+            -   **增加兜底**: 修复了由于账号权限导致无法获取官方项目 ID 时会跳过该账号的 Bug。现在系统会自动回退到经验证稳定的通用 Project ID (`bamboo-precept-lgxtn`)，确保 API 请求的连续性。
+        -   **[i18n] 完善 Settings 与 ApiProxy 国际化支持 (PR #1789)**:
+            -   **重构**: 将 `Settings.tsx` 和 `ApiProxy.tsx` 中硬编码的中文字符串替换为 `t()` 国际化调用。
+            -   **翻译补全**: 同步更新了韩语、缅甸语、葡萄牙语、俄语、土耳其语、越南语、繁体中文和简体中文的本地化词条。
+        -   **[核心修复] 修复 IP 白名单删除失败问题 (Issue #1797)**:
+            -   **参数规范化**: 修复了由于前端与后端参数命名风格 (snake_case vs camelCase) 不一致导致无法删除白名单 IP 的问题。同时统一了黑名单管理与 IP 访问日志的相关参数，确保全系统参数传递的一致性。
+    *   **v4.1.12 (2026-02-10)**:
+        -   **[核心功能] OpenCode CLI 深度集成 (PR #1739)**:
+            -   **自动探测**: 新增了对 OpenCode CLI 的自动检测与环境变量配置同步支持。
+            -   **一键同步**: 支持通过“外部 Providers”卡片将 Antigravity 的配置无缝注入到 OpenCode CLI 环境，实现零配置接入。
+        -   **[核心修复] Claude Opus 思考预算自动注入 (PR #1747)**:
+            -   **预算修正**: 修复了 Opus 模型在自动启用思考模式时，未能正确注入默认思考预算 (Thinking Budget) 的问题，防止因预算缺失导致的上游错误。
+        -   **[核心优化] Claude Opus 4.6 Thinking 全面升级 (Issue #1741, #1742, #1743)**:
+            -   **模型迭代**: 正式引入 `claude-opus-4-6-thinking` 支持，提供更强大的推理能力。
+            -   **无感迁移**: 实现了从 `claude-opus-4.5` / `claude-opus-4` 到 `4.6` 的自动重定向，旧版配置无需修改即可直接享受新模型。
+        -   **[核心修复] 账户索引自动修复机制 (PR #1755)**:
+            -   **容错增强**: 修复了在部分极端情况下（如文件损坏）账户索引无法自动重建的问题。现在系统会在检测到索引异常时自动触发自我修复流程，确保账号数据安全可用。
+        -   **[核心修复] 修复 IP 黑名单删除与时区问题 (PR #1748)**:
+            -   **参数修正**: 修复了 IP 黑名单删除接口因参数命名风格 (snake_case vs camelCase) 不匹配导致的删除失败问题。
+            -   **逻辑修复**: 修正了清除黑名单时传递了错误参数 (ip_pattern 而非 id) 的问题。
+            -   **时区校准**: 修复了宵禁时间 (Curfew) 判断逻辑，强制使用北京时间 (UTC+8)，解决了服务器本地时区非 UTC+8 时的判断偏差。
+            -   **拒绝对齐**: 优化了令牌拒绝响应，返回 403 状态码及 JSON 错误详情，对齐了统一错误响应标准。
+        -   **[核心功能] 新增迷你视图模式 (Mini View Mode) (PR #1750)**:
+            -   **便捷访问**: 新增迷你窗口模式，支持双向切换。该模式常驻桌面顶层，提供精简的快捷操作入口，方便用户即时查看状态与监控信息。
+        -   **[核心修复] Gemini 协议 400 错误自愈 (PR #1756)**:
+            -   **Token 补全**: 修复了在 Gemini 原生协议下调用持续思考模型（如 Claude Opus 4.6 Thinking）时，因 `maxOutputTokens` 小于 `thinkingBudget` 导致的 400 报错。现在系统会自动补全并对齐 Token 限制，确保请求合规。
+        -   **[核心修复] 修复 macOS 下 bun 全局安装的路径识别 (PR #1765)**:
+            -   **路径增强**: 新增对 `~/.bun/bin` 及全局安装路径的探测，解决了 bun 用户无法自动同步 Claude CLI 配置的问题。
+        -   **[核心优化] 修复 Logo 文本在小容器下的换行与显示 (PR #1766)**:
+            -   **显示优化**: 使用 Tailwind CSS 容器查询逻辑优化了 Logo 文本的显示与隐藏切换，防止在容器空间不足时发生文字换行。
+        -   **[核心修复] Google Cloud Code API 404 重试与账号轮换 (PR #1775)**:
+            -   **智能重试**: 针对 Google Cloud Code API 返回的 404 错误（常见于分阶段发布或权限差异场景），新增自动重试与账号轮换机制。系统将以 300ms 短延迟进行重试，并自动切换到下一个可用账号。
+            -   **短周期避让**: 对 404 错误实施 5 秒软锁定（区别于其他服务端错误的 8 秒），在保护账号的同时最大程度减少用户等待时间。
     *   **v4.1.11 (2026-02-09)**:
         -   **[核心优化] 重构 Token 轮询逻辑 (High-End Model Routing Optimization)**:
             -   **能力硬门槛**: 针对 `claude-opus-4-6` 等高端模型实施了严格的 Capability Filtering。系统现在会检查账号实际持有的 `model_quotas`，只有明确拥有目标模型配额的账号才能参与轮询，彻底解决了 Pro/Free 账号因 "Soft Priority" 而被错误选中的问题。
@@ -680,7 +817,7 @@ response = client.chat.completions.create(
             -   **逻辑优化**: 优化了配置加载流程，确保首次生成的随机 Key 被正确持久化；同时也确保了 Headless 模式下环境变量（如 `ABV_API_KEY`）的覆盖能够被前端正确获取。
         -   **[核心功能] 可配置思考预算 (Thinking Budget) (PR #1456)**:
             -   **预算控制**: 在系统设置中新增了“思考预算”配置项。
-            -   **智能适配**: 支持为 Claude 3.7+ 和 Gemini 2.0 Flash Thinking 等模型自定义最大思考 token 限制。
+            -   **智能适配**: 支持为 Claude 4.6+ 和 Gemini 2.0 Flash Thinking 等模型自定义最大思考 token 限制。
             -   **默认优化**: 默认值设置为智能适配模式，确保在大多数场景下不仅能获得完整思考过程，又能避免触发上游 budget 限制。
     *   **v4.0.13 (2026-02-02)**:
         -   **[核心优化] 负载均衡算法升级 (P2C Algorithm) (PR #1433)**:
@@ -1198,7 +1335,7 @@ response = client.chat.completions.create(
             -   **僵尸进程清理**: 优化了 `start.sh` 中的 cleanup 逻辑，改用 `pkill` 精准查杀 Xtigervnc 和 websockify 进程，并清理 `/tmp/.X11-unix` 锁文件，解决了重启后 VNC 无法连接的各种边缘情况。
             -   **健康检查升级**: 将 Healthcheck 检查项扩展到 websockify 和主程序，确保容器状态更真实地反映服务可用性。
             -   **重大修复**: 修复了 OpenAI 协议请求返回 404 的问题，并解决了 Codex (`/v1/responses`) 接收复杂对象数组 `input` 或 `apply_patch` 等自定义工具（缺失 Schema）时导致上游返回 400 (`INVALID_ARGUMENT`) 的兼容性缺陷。
-            -   **思维模型优化**: 解决了 Claude 3.7 Thinking 模型在历史消息缺失思维链时强制报错的问题，实现了智能协议降级与占位块注入。
+            -   **思维模型优化**: 解决了 Claude 4.6 Thinking 模型在历史消息缺失思维链时强制报错的问题，实现了智能协议降级与占位块注入。
             -   **协议补全**: 补全了 OpenAI Legacy 接口的 Token 统计响应与 Header 注入，支持 `input_text` 类型内容块，并将 `developer` 角色适配为系统指令。
             -   **requestId 统一**: 统一所有 OpenAI 路径下的 `requestId` 前缀为 `agent-`，解决部分客户端的 ID 识别问题。
         -   **[核心修复] JSON Schema 数组递归清理修复 (解决 Gemini API 400 错误)**:
