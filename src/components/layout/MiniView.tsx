@@ -70,7 +70,7 @@ export default function MiniView() {
                 }
             } else {
                 // Fallback for web mode if needed, or import from package.json
-                setAppVersion('4.1.10');
+                setAppVersion('4.1.22');
             }
         };
         fetchVersion();
@@ -136,7 +136,12 @@ export default function MiniView() {
 
     // Extract specific models to match AccountRow.tsx
     const geminiProModel = currentAccount?.quota?.models
-        .filter(m => m.name.toLowerCase() === 'gemini-3-pro-high' || m.name.toLowerCase() === 'gemini-3-pro-low')
+        .filter(m =>
+            m.name.toLowerCase() === 'gemini-3-pro-high'
+            || m.name.toLowerCase() === 'gemini-3-pro-low'
+            || m.name.toLowerCase() === 'gemini-3.1-pro-high'
+            || m.name.toLowerCase() === 'gemini-3.1-pro-low'
+        )
         .sort((a, b) => (a.percentage || 0) - (b.percentage || 0))[0];
 
     const geminiFlashModel = currentAccount?.quota?.models.find(m => m.name.toLowerCase() === 'gemini-3-flash');
@@ -176,7 +181,7 @@ export default function MiniView() {
                 <div className="flex justify-between items-baseline">
                     <span className="text-xs font-medium text-gray-600 dark:text-gray-400">{displayName}</span>
                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+                        <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono">
                             {model.reset_time ? `R: ${formatTimeRemaining(model.reset_time)}` : t('common.unknown')}
                         </span>
                         <span className={clsx("text-xs font-bold", getStatusColor(model.percentage))}>
@@ -271,7 +276,7 @@ export default function MiniView() {
                             {/* Models List */}
                             <AnimatePresence mode='popLayout'>
                                 <div className="space-y-4 !mt-0">
-                                    {renderModelRow(geminiProModel, 'Gemini 3 Pro', 'emerald')}
+                                    {renderModelRow(geminiProModel, 'Gemini 3.1 Pro', 'emerald')}
                                     {renderModelRow(geminiFlashModel, 'Gemini 3 Flash', 'emerald')}
                                     {renderModelRow(claudeModel, t('common.claude_series', 'Claude 系列'), 'cyan')}
 
