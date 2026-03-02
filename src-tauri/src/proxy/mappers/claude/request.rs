@@ -336,7 +336,12 @@ pub fn transform_claude_request_in(
     claude_req: &ClaudeRequest,
     project_id: &str,
     is_retry: bool,
+    account_id: Option<&str>,
+    _session_id: &str,
+    token: Option<&crate::proxy::token_manager::ProxyToken>, // [NEW] 支持动态规格
 ) -> Result<Value, String> {
+    let message_count = claude_req.messages.len();
+
     // [CRITICAL FIX] 预先清理所有消息中的 cache_control 字段
     // 这解决了 VS Code 插件等客户端在多轮对话中将历史消息的 cache_control 字段
     // 原封不动发回导致的 "Extra inputs are not permitted" 错误
@@ -356,13 +361,15 @@ pub fn transform_claude_request_in(
     // ThinkingConfig was provided by the client, inject a default config with a budget
     // to prevent 'thinking requires a budget' errors from upstream APIs.
     if cleaned_req.thinking.is_none() && should_enable_thinking_by_default(&cleaned_req.model) {
+        let default_budget = crate::proxy::model_specs::get_thinking_budget(&cleaned_req.model, token);
         tracing::info!(
-            "[Thinking-Mode] Injecting default ThinkingConfig (budget=10000) for model: {}",
+            "[Thinking-Mode] Injecting default ThinkingConfig (budget={}) for model: {}",
+            default_budget,
             cleaned_req.model
         );
         cleaned_req.thinking = Some(ThinkingConfig {
             type_: "enabled".to_string(),
-            budget_tokens: Some(10000),
+            budget_tokens: Some(default_budget as u32),
             effort: None,
         });
     }
@@ -539,6 +546,7 @@ pub fn transform_claude_request_in(
         &mapped_model,
         has_web_search_tool,
         is_thinking_enabled,
+        token, // [NEW] 传递 token 用于动态限额
     );
 
     // 2. Contents (Messages)
@@ -628,9 +636,14 @@ pub fn transform_claude_request_in(
         }
     }
 
+    // [ADDED v4.1.24] 注入稳定 sessionId 对齐官方规范
+    if let Some(account_id) = account_id {
+        inner_request["sessionId"] = json!(crate::proxy::common::session::derive_session_id(account_id));
+    }
 
     // 生成 requestId
-    let request_id = format!("agent-{}", uuid::Uuid::new_v4());
+    // [CHANGED v4.1.24] Structured requestId to match official format
+    let request_id = format!("agent/antigravity/{}/{}", &session_id[..session_id.len().min(8)], message_count);
 
     // 构建最终请求体
     let mut body = json!({
@@ -639,7 +652,8 @@ pub fn transform_claude_request_in(
         "request": inner_request,
         "model": config.final_model,
         "userAgent": "antigravity",
-        "requestType": config.request_type,
+        // [CHANGED v4.1.24] Use "agent" for all non-image requests
+        "requestType": if config.request_type == "image_gen" { "image_gen" } else { "agent" },
     });
 
     // 如果提供了 metadata.user_id，则复用为 sessionId
@@ -1249,31 +1263,36 @@ fn build_contents(
                             tool_result_compressor::sanitize_tool_result_blocks(blocks);
                         }
 
-                        // Smart Truncation: strict image removal
-                        // Remove all Base64 images from historical tool results to save context.
-                        // Only allow text.
+                        // Smart Truncation: No longer stripping images from Tool Results
+                        // Tool results should pass transparency. If images are present, map them to inlineData.
+                        let mut extra_parts = Vec::new();
+
                         let mut merged_content = match &compacted_content {
                             serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Array(arr) => arr
-                                .iter()
-                                .filter_map(|block| {
+                            serde_json::Value::Array(arr) => {
+                                let mut texts = Vec::new();
+                                for block in arr {
                                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                                        Some(text.to_string())
+                                        texts.push(text.to_string());
                                     } else if block.get("source").is_some() {
-                                        // If it's an image/document, replace with placeholder
-                                        if block.get("type").and_then(|v| v.as_str())
-                                            == Some("image")
-                                        {
-                                            Some("[image omitted to save context]".to_string())
-                                        } else {
-                                            None
+                                        if block.get("type").and_then(|v| v.as_str()) == Some("image") {
+                                            let source = block.get("source").unwrap();
+                                            if let (Some(media_type), Some(data)) = (
+                                                source.get("media_type").and_then(|v| v.as_str()),
+                                                source.get("data").and_then(|v| v.as_str())
+                                            ) {
+                                                extra_parts.push(json!({
+                                                    "inlineData": {
+                                                        "mimeType": media_type,
+                                                        "data": data
+                                                    }
+                                                }));
+                                            }
                                         }
-                                    } else {
-                                        None
                                     }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
+                                }
+                                texts.join("\n")
+                            }
                             _ => content.to_string(),
                         };
 
@@ -1303,19 +1322,24 @@ fn build_contents(
                             }
                         }
 
-                        parts.push(json!({
+                        let mut part = json!({
                             "functionResponse": {
                                 "name": func_name,
                                 "response": {"result": merged_content},
                                 "id": tool_use_id
                             }
-                        }));
+                        });
 
                         // [FIX] Tool Result 也需要回填签名（如果上下文中有）
                         if let Some(sig) = last_thought_signature.as_ref() {
-                            if let Some(last_part) = parts.last_mut() {
-                                last_part["thoughtSignature"] = json!(sig);
-                            }
+                            part["thoughtSignature"] = json!(sig);
+                        }
+
+                        parts.push(part);
+
+                        // 追加图片 parts
+                        for extra in extra_parts {
+                            parts.push(extra);
                         }
 
                         // 标记状态，用于下一条 User 消息的去重判断
@@ -1702,6 +1726,7 @@ fn build_generation_config(
     mapped_model: &str,
     _has_web_search: bool,
     is_thinking_enabled: bool,
+    token: Option<&crate::proxy::token_manager::ProxyToken>, // [NEW]
 ) -> Value {
     let mut config = json!({});
 
@@ -1715,25 +1740,27 @@ fn build_generation_config(
             .thinking
             .as_ref()
             .and_then(|t| t.budget_tokens)
-            .unwrap_or(16000);
+            .unwrap_or_else(|| crate::proxy::model_specs::get_thinking_budget(mapped_model, token) as u32);
+
+        let thinking_budget_cap = crate::proxy::model_specs::get_thinking_budget(mapped_model, token);
 
         let tb_config = crate::proxy::config::get_thinking_budget_config();
         let budget = match tb_config.mode {
-            crate::proxy::config::ThinkingBudgetMode::Passthrough => budget_tokens,
+            crate::proxy::config::ThinkingBudgetMode::Passthrough => budget_tokens as u64,
             crate::proxy::config::ThinkingBudgetMode::Custom => {
-                let mut custom_value = tb_config.custom_value;
-                // [FIX #1602] 针对 Gemini 系列模型，在自定义模式下也强制执行 24576 上限
+                let mut custom_value = tb_config.custom_value as u64;
+                // [FIX #1602] 针对 Gemini 系列模型，在自定义模式下也强制执行动态限额
                 let model_lower = mapped_model.to_lowercase();
                 let is_gemini_limited = (model_lower.contains("gemini") && !model_lower.contains("-image"))
                     || model_lower.contains("flash")
                     || model_lower.ends_with("-thinking");
 
-                if is_gemini_limited && custom_value > 24576 {
+                if is_gemini_limited && custom_value > thinking_budget_cap {
                     tracing::warn!(
-                        "[Claude-Request] Custom mode: capping thinking_budget from {} to 24576 for Gemini model {}",
-                        custom_value, mapped_model
+                        "[Claude-Request] Custom mode: capping thinking_budget from {} to {} for Gemini model {}",
+                        custom_value, thinking_budget_cap, mapped_model
                     );
-                    custom_value = 24576;
+                    custom_value = thinking_budget_cap;
                 }
                 custom_value
             }
@@ -1743,22 +1770,22 @@ fn build_generation_config(
                 let is_gemini_limited = (model_lower.contains("gemini") && !model_lower.contains("-image"))
                     || model_lower.contains("flash")
                     || model_lower.ends_with("-thinking");
-                if is_gemini_limited && budget_tokens > 24576 {
+                if is_gemini_limited && budget_tokens as u64 > thinking_budget_cap {
                     tracing::info!(
-                        "[Claude-Request] Auto mode: capping thinking_budget from {} to 24576 for Gemini model {}", 
-                        budget_tokens, mapped_model
+                        "[Claude-Request] Auto mode: capping thinking_budget from {} to {} for Gemini model {}", 
+                        budget_tokens, thinking_budget_cap, mapped_model
                     );
-                    24576
+                    thinking_budget_cap
                 } else {
-                    budget_tokens
+                    budget_tokens as u64
                 }
             }
-            crate::proxy::config::ThinkingBudgetMode::Adaptive => budget_tokens, // Adaptive 模式透传原始预算（但不作为限制），用于后续逻辑判断
+            crate::proxy::config::ThinkingBudgetMode::Adaptive => budget_tokens as u64, // Adaptive 模式透传原始预算（但不作为限制），用于后续逻辑判断
         };
 
         let global_mode_is_adaptive = matches!(tb_config.mode, crate::proxy::config::ThinkingBudgetMode::Adaptive);
-        // 只要用户指定 adaptive 或者全局配置为 adaptive，且是 Claude 模型，就启用自适应
-        let should_use_adaptive = (user_is_adaptive || global_mode_is_adaptive) && mapped_model.to_lowercase().contains("claude");
+        // 只要用户指定 adaptive 或者全局配置为 adaptive，且是支持的思维模型，就启用自适应
+        let should_use_adaptive = (user_is_adaptive || global_mode_is_adaptive) && (mapped_model.to_lowercase().contains("claude") || mapped_model.to_lowercase().contains("gemini-3"));
 
         let effort = claude_req.output_config.as_ref().and_then(|c| c.effort.as_ref())
             .or_else(|| claude_req.thinking.as_ref().and_then(|t| t.effort.as_ref()));
@@ -1776,6 +1803,8 @@ fn build_generation_config(
                 };
                 tracing::debug!("[Claude-Request] Mapping adaptive mode to thinkingLevel: {} for Gemini 3 model", mapped_level);
                 thinking_config["thinkingLevel"] = json!(mapped_level);
+                // [FIX] Gemini 3 using thinkingLevel must NOT have thinkingBudget to avoid 400
+                thinking_config.as_object_mut().unwrap().remove("thinkingBudget");
             } else {
                 // [FIX #2007] Cherry Studio / Claude Protocol 400 Error Fix
                 // Gemini 1.5/2.0 models via Vertex AI often reject thinkingBudget: -1 (Adaptive) with 400 Invalid Argument
@@ -1810,9 +1839,13 @@ fn build_generation_config(
     }
     if let Some(top_p) = claude_req.top_p {
         config["topP"] = json!(top_p);
+    } else {
+        config["topP"] = json!(1.0); // [CHANGED v4.1.24] Default topP=1.0 to match official client
     }
     if let Some(top_k) = claude_req.top_k {
         config["topK"] = json!(top_k);
+    } else {
+        config["topK"] = json!(40); // [ADDED v4.1.24] Default topK=40 to match official client
     }
 
 
@@ -1854,10 +1887,11 @@ fn build_generation_config(
             if current <= budget as i64 {
                 // [FIX #1675] 针对图像模型使用更小的增量 (2048)
                 let overhead = if mapped_model.contains("-image") { 2048 } else { 8192 };
-                final_max_tokens = Some((budget + overhead) as i64);
+                let boosted = (budget + overhead).min(65536); // [FIX] Never exceed hard limit
+                final_max_tokens = Some(boosted as i64);
                 tracing::info!(
                     "[Generation-Config] Bumping maxOutputTokens to {} due to thinking budget of {}", 
-                    final_max_tokens.unwrap(), budget
+                    boosted, budget
                 );
             }
         } else if is_adaptive_effective {
@@ -2033,7 +2067,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
 
         let body = result.unwrap();
@@ -2130,7 +2164,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
 
         let body = result.unwrap();
@@ -2200,7 +2234,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
 
         // 验证请求成功转换
@@ -2274,7 +2308,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
 
         let body = result.unwrap();
@@ -2324,7 +2358,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
 
         let body = result.unwrap();
@@ -2380,7 +2414,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok(), "Transformation failed");
         let body = result.unwrap();
         let contents = body["request"]["contents"].as_array().unwrap();
@@ -2428,7 +2462,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-project", false);
+        let result = transform_claude_request_in(&req, "test-project", false, None, "test_session");
         assert!(result.is_ok());
         let body = result.unwrap();
         let parts = body["request"]["contents"][0]["parts"].as_array().unwrap();
@@ -2619,7 +2653,7 @@ mod tests {
             quality: None,
         };
 
-        let result = transform_claude_request_in(&req, "test-v", false).unwrap();
+        let result = transform_claude_request_in(&req, "test-v", false, None, "test_session").unwrap();
         // [FIX] Since we removed the default 81920, maxOutputTokens should NOT be present
         // when max_tokens is None and thinking is disabled
         let gen_config = &result["request"]["generationConfig"];
@@ -2657,7 +2691,7 @@ mod tests {
         };
 
         // Should cap at 24576
-        let result = transform_claude_request_in(&req, "proj", false).unwrap();
+        let result = transform_claude_request_in(&req, "proj", false, None, "test_session").unwrap();
 
         let gen_config = &result["request"]["generationConfig"]; // Corrected path
         let budget = gen_config["thinkingConfig"]["thinkingBudget"]
@@ -2688,7 +2722,7 @@ mod tests {
         };
 
         // Should cap
-        let result_pro = transform_claude_request_in(&req_pro, "proj", false).unwrap();
+        let result_pro = transform_claude_request_in(&req_pro, "proj", false, None, "test_session").unwrap();
         let budget_pro = result_pro["request"]["generationConfig"]["thinkingConfig"]
             ["thinkingBudget"]
             .as_u64()
@@ -2725,7 +2759,7 @@ mod tests {
         };
 
         // Transform
-        let result = transform_claude_request_in(&req, "proj", false).unwrap();
+        let result = transform_claude_request_in(&req, "proj", false, None, "test_session").unwrap();
         let gen_config = &result["request"]["generationConfig"];
 
         // thinkingConfig should be present (not forced disabled)
@@ -2765,7 +2799,7 @@ mod tests {
         };
 
         // Transform
-        let result = transform_claude_request_in(&req, "proj", false).unwrap();
+        let result = transform_claude_request_in(&req, "proj", false, None, "test_session").unwrap();
         let gen_config = &result["request"]["generationConfig"];
 
         // thinkingConfig SHOULD be injected because of default-on logic
@@ -2802,7 +2836,7 @@ mod tests {
         };
 
         // 3. Transform request
-        let result = transform_claude_request_in(&req, "test-proj", false).unwrap();
+        let result = transform_claude_request_in(&req, "test-proj", false, None, "test_session").unwrap();
 
         // 4. Verify thinkingConfig has includeThoughts: false
         let gen_config = result["request"]["generationConfig"].as_object().expect("Should have generationConfig");
@@ -2846,7 +2880,7 @@ mod tests {
         };
 
         // Transform
-        let result = transform_claude_request_in(&req, "test-proj", false).unwrap();
+        let result = transform_claude_request_in(&req, "test-proj", false, None, "test_session").unwrap();
         
         let gen_config = result["request"]["generationConfig"].as_object().unwrap();
         let thinking_config = gen_config["thinkingConfig"].as_object().unwrap();
